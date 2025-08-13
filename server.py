@@ -89,6 +89,8 @@ async def game_loop():
     TICK_RATE = 30
     while True:
         # iterate over a copy to avoid RuntimeError if players are removed
+
+        
         for p in list(players.values()):
             if p['moving']:
                 if p['direction'] == 'up':
