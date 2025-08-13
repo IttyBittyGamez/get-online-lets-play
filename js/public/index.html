@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Get Online Let's Play</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #gameCanvas { display: block; background: #f0f0f0; margin: 0 auto; }
+    #chatInput {
+      display: none;
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 10px;
+      width: 400px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <input type="text" id="chatInput" placeholder="Type a message and press Enter..." />
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
