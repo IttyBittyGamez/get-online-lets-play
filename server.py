@@ -50,7 +50,7 @@ async def broadcast(message):
 
 async def handle_client(reader, writer):
     global next_id
-    # Assign a unique id to this player
+    peername = writer.get_extra_info("peername")
     pid = str(next_id)
     next_id += 1
     # Create new player state
@@ -64,6 +64,7 @@ async def handle_client(reader, writer):
         "inputs": {"up": False, "down": False, "left": False, "right": False}
     }
     connections[writer] = pid
+    print(f"Client {pid} connected from {peername}")
     # Send your info and current players list
     await send_message(writer, {"type": "yourInfo", "id": pid})
     await send_message(writer, {"type": "currentPlayers", "players": players})
@@ -93,10 +94,10 @@ async def handle_client(reader, writer):
     except Exception:
         pass
     # Client disconnected
-    # Clean up player state
     if pid in players:
         players.pop(pid, None)
     connections.pop(writer, None)
+    print(f"Client {pid} disconnected")
     await broadcast({"type": "playerDisconnected", "id": pid})
     try:
         writer.close()
@@ -111,8 +112,8 @@ async def game_loop():
     while True:
         if players:
             for p in players.values():
-                # Handle rotation
                 inputs = p["inputs"]
+                # Handle rotation
                 rot_dir = 0
                 if inputs["left"]:
                     rot_dir -= 1
@@ -134,7 +135,11 @@ async def game_loop():
         await asyncio.sleep(1.0 / TICK_RATE)
 
 async def main():
-    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=8765)
+    host = "0.0.0.0"
+    port = 8765
+    server = await asyncio.start_server(handle_client, host=host, port=port)
+    addr = server.sockets[0].getsockname()
+    print(f"Server started on {addr[0]}:{addr[1]}")
     async with server:
         await asyncio.gather(server.serve_forever(), game_loop())
 
