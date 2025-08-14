@@ -1,13 +1,17 @@
 import asyncio
 import json
 import random
-import time
 import math
+
+# Canvas dimensions (for initial spawn positions)
+WIDTH, HEIGHT = 800, 600
 
 # Store players keyed by unique string ids
 players = {}
-# Map id to writer objects
+
+# Map writer objects to player ids
 connections = {}
+
 next_id = 1
 
 # Animal names for random name generation
@@ -19,58 +23,51 @@ ANIMALS = [
 ]
 
 def random_name():
-    return random.choice(ANIMALS) + str(random.randint(100, 999))
+    return random.choice(ANIMALS) + str(random.randint(1000, 9999))
 
 def random_color():
+    # Return hex color with leading '#'
     return f"#{random.randint(0, 0xFFFFFF):06x}"
 
 async def send_message(writer, message):
-    """Send a JSON message over the given writer."""
     try:
-        data = json.dumps(message) + "\n"
-        writer.write(data.encode())
+        writer.write((json.dumps(message) + "\n").encode())
         await writer.drain()
     except Exception:
         pass
 
-async def broadcast(message, exclude=None):
-    """Broadcast a message to all connected players except an optional exclude id."""
-    for pid, writer in list(connections.items()):
-        if pid != exclude:
-            try:
-                await send_message(writer, message)
-            except Exception:
-                continue
+async def broadcast(message):
+    data = json.dumps(message) + "\n"
+    for writer in list(connections.keys()):
+        try:
+            writer.write(data.encode())
+        except Exception:
+            continue
+    # drain writers concurrently
+    coros = [w.drain() for w in connections.keys()]
+    if coros:
+        await asyncio.gather(*coros, return_exceptions=True)
 
 async def handle_client(reader, writer):
-    """Handle a newly connected client."""
     global next_id
+    # Assign a unique id to this player
     pid = str(next_id)
     next_id += 1
-
-    # Initialize player with position and random orientation
-    name = random_name()
-    x = random.randint(50, 750)
-    y = random.randint(50, 550)
-    color = random_color()
-    angle = random.randint(0, 359)
+    # Create new player state
     players[pid] = {
         "id": pid,
-        "name": name,
-        "x": x,
-        "y": y,
-        "angle": angle,
-        "direction": "",
-        "moving": False,
-        "color": color,
-        "messages": []
+        "name": random_name(),
+        "x": random.randint(50, WIDTH - 50),
+        "y": random.randint(50, HEIGHT - 50),
+        "angle": 0.0,
+        "color": random_color(),
+        "inputs": {"up": False, "down": False, "left": False, "right": False}
     }
-    connections[pid] = writer
-
-    # Send player data to new client and broadcast to others
-    await send_message(writer, {"type": "yourInfo", "player": players[pid]})
+    connections[writer] = pid
+    # Send your info and current players list
+    await send_message(writer, {"type": "yourInfo", "id": pid})
     await send_message(writer, {"type": "currentPlayers", "players": players})
-    await broadcast({"type": "newPlayer", "player": players[pid]}, exclude=pid)
+    await broadcast({"type": "newPlayer", "player": players[pid]})
 
     try:
         while True:
@@ -78,66 +75,68 @@ async def handle_client(reader, writer):
             if not line:
                 break
             try:
-                data = json.loads(line.decode().strip())
-            except json.JSONDecodeError:
+                msg = json.loads(line.decode().strip())
+            except Exception:
                 continue
-            mtype = data.get("type")
-            if mtype in ("moveStart", "movestart"):
-                direction = data.get("direction")
-                if direction in ("up", "down", "left", "right"):
-                    players[pid]["direction"] = direction
-                    players[pid]["moving"] = True
-            elif mtype in ("moveStop", "movestop"):
-                direction = data.get("direction")
-                if direction == players[pid]["direction"]:
-                    players[pid]["moving"] = False
-            elif mtype == "chat":
-                text = data.get("text", "")
-                if text:
-                    players[pid]["messages"].append({"text": text, "time": time.time()})
-                    await broadcast({"type": "chat", "id": pid, "text": text})
+            msg_type = msg.get("type")
+            if msg_type == "moveStart":
+                direction = msg.get("direction")
+                if direction in players[pid]["inputs"]:
+                    players[pid]["inputs"][direction] = True
+            elif msg_type == "moveStop":
+                direction = msg.get("direction")
+                if direction in players[pid]["inputs"]:
+                    players[pid]["inputs"][direction] = False
+            elif msg_type == "chat":
+                text = msg.get("text", "")
+                await broadcast({"type": "chat", "id": pid, "text": text})
     except Exception:
         pass
-    finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        if pid in players:
-            players.pop(pid, None)
-        if pid in connections:
-            connections.pop(pid, None)
-        await broadcast({"type": "playerDisconnected", "id": pid})
+    # Client disconnected
+    # Clean up player state
+    if pid in players:
+        players.pop(pid, None)
+    connections.pop(writer, None)
+    await broadcast({"type": "playerDisconnected", "id": pid})
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
 
-async def game_loop(tick_rate=30, speed=3, rot_speed=5):
-    """Update player positions and orientations and broadcast state."""
+async def game_loop():
+    SPEED = 3.0
+    ROTATE_SPEED = 5.0  # degrees per tick
+    TICK_RATE = 30.0
     while True:
-        for p in list(players.values()):
-            if p["moving"]:
-                d = p["direction"]
-                if d == "up":
-                    rad = math.radians(p["angle"])
-                    p["x"] += math.sin(rad) * speed
-                    p["y"] -= math.cos(rad) * speed
-                elif d == "down":
-                    rad = math.radians(p["angle"])
-                    p["x"] -= math.sin(rad) * speed
-                    p["y"] += math.cos(rad) * speed
-                elif d == "left":
-                    p["angle"] = (p["angle"] - rot_speed) % 360
-                elif d == "right":
-                    p["angle"] = (p["angle"] + rot_speed) % 360
         if players:
+            for p in players.values():
+                # Handle rotation
+                inputs = p["inputs"]
+                rot_dir = 0
+                if inputs["left"]:
+                    rot_dir -= 1
+                if inputs["right"]:
+                    rot_dir += 1
+                p["angle"] = (p["angle"] + rot_dir * ROTATE_SPEED) % 360
+                # Handle movement
+                move = 0
+                if inputs["up"]:
+                    move += 1
+                if inputs["down"]:
+                    move -= 1
+                if move != 0:
+                    rad = math.radians(p["angle"])
+                    p["x"] += move * SPEED * math.cos(rad)
+                    p["y"] += move * SPEED * math.sin(rad)
+            # Broadcast updated state
             await broadcast({"type": "state", "players": players})
-        await asyncio.sleep(1 / tick_rate)
+        await asyncio.sleep(1.0 / TICK_RATE)
 
-async def main(host="0.0.0.0", port=8765):
-    server = await asyncio.start_server(handle_client, host, port)
-    loop_task = asyncio.create_task(game_loop())
-    print(f"Server started on {host}:{port}")
+async def main():
+    server = await asyncio.start_server(handle_client, host="0.0.0.0", port=8765)
     async with server:
-        await server.serve_forever()
+        await asyncio.gather(server.serve_forever(), game_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
