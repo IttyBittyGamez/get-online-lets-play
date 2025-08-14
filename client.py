@@ -113,7 +113,6 @@ def handle_message(data):
         if pid:
             chat_bubbles.setdefault(pid, [])
             chat_bubbles[pid].insert(0, (text, time.time() + 5))
-            # Limit number of bubbles
             if len(chat_bubbles[pid]) > 3:
                 chat_bubbles[pid] = chat_bubbles[pid][:3]
 
@@ -132,8 +131,8 @@ def render():
             color = "#" + color
         # Draw player square
         canvas.create_rectangle(x, y, x + 20, y + 20, fill=color, outline="")
-        # Draw orientation arrow
-        rad = angle * math.pi / 180.0
+        # Draw orientation arrow (adjust by -90 degrees so 0 degrees points up)
+        rad = math.radians(angle - 90)
         cx = x + 10
         cy = y + 10
         length = 15
@@ -153,7 +152,6 @@ def render():
 def on_key_press(event):
     """Handle key press events for movement and chat."""
     global chat_mode
-    # Enter toggles chat mode
     if event.keysym == "Return":
         if not chat_mode:
             chat_mode = True
