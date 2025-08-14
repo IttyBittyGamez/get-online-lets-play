@@ -1,225 +1,196 @@
 import asyncio
 import json
 import queue
-import random
 import threading
 import time
 import math
 import tkinter as tk
 
-# Canvas dimensions
+# Canvas
 WIDTH, HEIGHT = 800, 600
 
-# Store players keyed by id
+# State
 players = {}
+projectiles = []
 my_id = None
 
-# Queue for communication between network thread and GUI thread
+# Inter-thread comms
 msg_queue = queue.Queue()
-
-# Store network event loop and writer
 network_state = {"loop": None, "writer": None}
 
-# Chat bubbles {player_id: [(text, expiry_time), ...]}
-chat_bubbles = {}
-
-# Track key states to avoid duplicate messages
-keys = {"up": False, "down": False, "left": False, "right": False}
-
-# Chat mode flag
+# Chat
+CHAT_DURATION_MS = 5000
 chat_mode = False
+chat_text = ""
 
-def run_network(host="localhost", port=8765):
-    """Runs in a separate thread. Connects to the server and reads messages."""
-    async def network_coroutine():
-        try:
-            reader, writer = await asyncio.open_connection(host, port)
-        except Exception as e:
-            print(f"Unable to connect to server: {e}")
-            return
-        # Save loop and writer for send_message
-        network_state["loop"] = asyncio.get_running_loop()
+def start_network_thread(host="127.0.0.1", port=8765):
+    def _runner():
+        loop = asyncio.new_event_loop()
+        network_state["loop"] = loop
+        loop.run_until_complete(receiver(host, port))
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+
+async def receiver(host="127.0.0.1", port=8765):
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
         network_state["writer"] = writer
-
-        async def read_loop():
-            while True:
-                line = await reader.readline()
-                if not line:
-                    break
-                try:
-                    data = json.loads(line.decode().strip())
-                    msg_queue.put(data)
-                except Exception:
-                    continue
-        await read_loop()
-
-    asyncio.run(network_coroutine())
-
-def send_message(message: dict):
-    """Send a message to the server from the GUI thread."""
-    loop = network_state.get("loop")
-    writer = network_state.get("writer")
-    if not loop or not writer:
-        return
-    async def _async_write():
-        writer.write((json.dumps(message) + "\n").encode())
-        await writer.drain()
-    asyncio.run_coroutine_threadsafe(_async_write(), loop)
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line.decode("utf-8"))
+                msg_queue.put(msg)
+            except Exception:
+                pass
+    except Exception as e:
+        msg_queue.put({"type": "error", "error": str(e)})
 
 def process_messages():
-    """Process messages from the network thread."""
-    now = time.time()
+    global my_id, projectiles
+    while True:
+        try:
+            msg = msg_queue.get_nowait()
+        except queue.Empty:
+            break
+
+        t = msg.get("type")
+        if t == "currentPlayers":
+            players.clear()
+            players.update(msg.get("players", {}))
+        elif t == "state":
+            players.clear()
+            players.update(msg.get("players", {}))
+            projectiles = msg.get("projectiles", [])
+        elif t == "newPlayer":
+            p = msg.get("player")
+            if p:
+                players[p["id"]] = p
+        elif t == "playerDisconnected":
+            players.pop(msg.get("id"), None)
+        elif t == "yourInfo":
+            you = msg.get("you")
+            if you:
+                my_id = you.get("id")
+        elif t == "chat":
+            # Could handle client-side chat bubble timers here if desired
+            pass
+
+def send_obj(obj: dict):
+    w = network_state.get("writer")
+    loop = network_state.get("loop")
+    if not w or not loop:
+        return
     try:
-        while True:
-            data = msg_queue.get_nowait()
-            handle_message(data)
-    except queue.Empty:
+        w.write((json.dumps(obj) + "\n").encode("utf-8"))
+        asyncio.run_coroutine_threadsafe(w.drain(), loop)
+    except Exception:
         pass
-    # Remove expired chat bubbles
-    for pid in list(chat_bubbles.keys()):
-        chat_bubbles[pid] = [(text, expiry) for text, expiry in chat_bubbles[pid] if expiry > now]
-    root.after(30, process_messages)
 
-def handle_message(data):
-    """Handle a single message from the server."""
-    global my_id
-    t = data.get("type")
-    if t == "yourInfo":
-        my_id = data.get("id")
-    elif t == "currentPlayers":
-        players.clear()
-        for pid, p in data.get("players", {}).items():
-            players[pid] = p
-            chat_bubbles.setdefault(pid, [])
-    elif t == "newPlayer":
-        p = data.get("player")
-        if p:
-            pid = p["id"]
-            players[pid] = p
-            chat_bubbles.setdefault(pid, [])
-    elif t == "playerDisconnected":
-        pid = data.get("id")
-        if pid and pid in players:
-            players.pop(pid, None)
-            chat_bubbles.pop(pid, None)
-    elif t == "state":
-        for pid, p in data.get("players", {}).items():
-            if pid in players:
-                players[pid].update(p)
-    elif t == "chat":
-        pid = data.get("id")
-        text = data.get("text", "")
-        if pid:
-            chat_bubbles.setdefault(pid, [])
-            chat_bubbles[pid].insert(0, (text, time.time() + 5))
-            if len(chat_bubbles[pid]) > 3:
-                chat_bubbles[pid] = chat_bubbles[pid][:3]
+def send_move_event(kind, direction):
+    send_obj({"type": kind, "dir": direction})
 
-def render():
-    """Render players and chat bubbles on the canvas."""
-    canvas.delete("all")
-    for pid, p in players.items():
-        x = p.get("x", 0)
-        y = p.get("y", 0)
-        angle = p.get("angle", 0)
-        name = p.get("name", "")
-        color = p.get("color", "#888888")
-        if not isinstance(color, str):
-            color = str(color)
-        if not color.startswith("#"):
-            color = "#" + color
-        # Draw player square
-        canvas.create_rectangle(x, y, x + 20, y + 20, fill=color, outline="")
-        # Draw orientation arrow - align with player's angle
-        rad = math.radians(angle)
-        cx = x + 10
-        cy = y + 10
-        length = 15
-        ex = cx + length * math.cos(rad)
-        ey = cy + length * math.sin(rad)
-        canvas.create_line(cx, cy, ex, ey, fill="black", width=2)
-        # Draw player name
-        canvas.create_text(cx, y - 10, text=name, fill="black")
-        # Draw chat bubbles
-        if pid in chat_bubbles:
-            offset = 0
-            for text, expiry in chat_bubbles[pid]:
-                canvas.create_text(cx, y - 30 - offset, text=text, fill="black", font=("Arial", 8))
-                offset += 12
-    root.after(33, render)
+def send_shoot():
+    send_obj({"type": "shoot"})
+
+pressed = {"up": False, "down": False, "left": False, "right": False}
 
 def on_key_press(event):
-    """Handle key press events for movement and chat."""
-    global chat_mode
-    if event.keysym == "Return":
-        if not chat_mode:
-            chat_mode = True
-            chat_entry.delete(0, tk.END)
-            chat_entry.place(x=10, y=HEIGHT - 30, width=200)
-            chat_entry.focus_set()
-        else:
-            msg = chat_entry.get().strip()
-            chat_entry.place_forget()
-            root.focus_set()
+    global chat_mode, chat_text
+    if chat_mode:
+        if event.keysym == "Return":
+            txt = chat_text.strip()
+            if txt:
+                send_obj({"type": "chat", "text": txt[:140]})
+            chat_text = ""
             chat_mode = False
-            if msg:
-                send_message({"type": "chat", "text": msg})
+        elif event.keysym == "BackSpace":
+            chat_text = chat_text[:-1]
+        elif len(event.char) == 1:
+            chat_text += event.char
         return
 
-    if chat_mode:
+    if event.keysym == "Return":
+        chat_mode = True
+        chat_text = ""
+        return
+
+    if event.keysym.lower() == "x":
+        send_shoot()
         return
 
     keymap = {
-        "Up": "up",
-        "Down": "down",
-        "Left": "left",
-        "Right": "right",
-        "w": "up",
-        "s": "down",
-        "a": "left",
-        "d": "right",
+        "Up": "up", "w": "up",
+        "Down": "down", "s": "down",
+        "Left": "left", "a": "left",
+        "Right": "right", "d": "right",
     }
-    direction = keymap.get(event.keysym)
-    if direction and not keys[direction]:
-        keys[direction] = True
-        send_message({"type": "moveStart", "direction": direction})
+    d = keymap.get(event.keysym) or keymap.get(event.keysym.lower())
+    if d and not pressed[d]:
+        pressed[d] = True
+        send_move_event("moveStart", d)
 
 def on_key_release(event):
-    """Handle key release events."""
-    if chat_mode:
-        return
     keymap = {
-        "Up": "up",
-        "Down": "down",
-        "Left": "left",
-        "Right": "right",
-        "w": "up",
-        "s": "down",
-        "a": "left",
-        "d": "right",
+        "Up": "up", "w": "up",
+        "Down": "down", "s": "down",
+        "Left": "left", "a": "left",
+        "Right": "right", "d": "right",
     }
-    direction = keymap.get(event.keysym)
-    if direction and keys[direction]:
-        keys[direction] = False
-        send_message({"type": "moveStop", "direction": direction})
+    d = keymap.get(event.keysym) or keymap.get(event.keysym.lower())
+    if d and pressed.get(d):
+        pressed[d] = False
+        send_move_event("moveStop", d)
 
-# Start network thread
-threading.Thread(target=run_network, kwargs={"host": "localhost", "port": 8765}, daemon=True).start()
-
-# Setup GUI
+# --- UI ---
 root = tk.Tk()
-root.title("Get Online Let's Play")
-canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg="white")
+root.title("Get Online Let's Play (Python)")
+canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg="#222222")
 canvas.pack()
-chat_entry = tk.Entry(root)
-chat_entry.place_forget()
 
-# Bind events
 root.bind("<KeyPress>", on_key_press)
 root.bind("<KeyRelease>", on_key_release)
 
-# Start loops
-root.after(30, process_messages)
-root.after(33, render)
+def render():
+    canvas.delete("all")
 
-root.mainloop()
+    # Draw players
+    for p in players.values():
+        x = p.get("x", 100.0)
+        y = p.get("y", 100.0)
+        color = p.get("color", "#44aaff")
+
+        # body
+        canvas.create_rectangle(x-10, y-10, x+10, y+10, fill=color, outline="")
+
+        # facing arrow (0 deg = right/east; +90 = down)
+        ang = p.get("angle", 0.0)
+        rad = math.radians(ang)
+        x2 = x + 18 * math.cos(rad)
+        y2 = y + 18 * math.sin(rad)
+        canvas.create_line(x, y, x2, y2, width=2)
+
+        # name
+        canvas.create_text(x, y-18, text=p.get("name", ""), fill="#ffffff")
+
+    # Draw projectiles
+    for pr in projectiles:
+        px = pr.get("x", 0.0)
+        py = pr.get("y", 0.0)
+        canvas.create_oval(px-3, py-3, px+3, py+3, outline="", fill="#ffffff")
+
+    # If chatting, show input hint
+    if chat_mode:
+        canvas.create_text(WIDTH//2, HEIGHT-30,
+                           text="Type message: " + chat_text,
+                           fill="#00ffcc")
+
+    process_messages()
+    root.after(33, render)  # ~30 FPS
+
+if __name__ == "__main__":
+    # Change host here if your server runs elsewhere:
+    start_network_thread(host="127.0.0.1", port=8765)
+    root.after(33, render)
+    root.mainloop()
