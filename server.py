@@ -2,14 +2,15 @@ import asyncio
 import json
 import random
 import time
+import math
 
 # Store players keyed by unique string ids
 players = {}
-# Map id to writer objects for sending messages
+# Map id to writer objects
 connections = {}
 next_id = 1
 
-# List of animals for random names
+# Animal names for random name generation
 ANIMALS = [
     "Aardvark", "Badger", "Cheetah", "Dolphin", "Eagle", "Fox", "Giraffe",
     "Hippo", "Iguana", "Jaguar", "Koala", "Lemur", "Meerkat", "Narwhal",
@@ -21,21 +22,19 @@ def random_name():
     return random.choice(ANIMALS) + str(random.randint(100, 999))
 
 def random_color():
-    # Prefix with '#' for Tkinter compatibility
     return f"#{random.randint(0, 0xFFFFFF):06x}"
 
 async def send_message(writer, message):
-    """Send a JSON-serialisable message to a writer."""
+    """Send a JSON message over the given writer."""
     try:
         data = json.dumps(message) + "\n"
         writer.write(data.encode())
         await writer.drain()
     except Exception:
-        # If sending fails ignore; connection will be cleaned up on next loop
         pass
 
 async def broadcast(message, exclude=None):
-    """Broadcast a message to all connected players except optional exclude id."""
+    """Broadcast a message to all connected players except an optional exclude id."""
     for pid, writer in list(connections.items()):
         if pid != exclude:
             try:
@@ -44,35 +43,35 @@ async def broadcast(message, exclude=None):
                 continue
 
 async def handle_client(reader, writer):
-    """Handle a new incoming TCP client."""
+    """Handle a newly connected client."""
     global next_id
     pid = str(next_id)
     next_id += 1
 
-    # Register new player
+    # Initialize player with position and random orientation
     name = random_name()
     x = random.randint(50, 750)
     y = random.randint(50, 550)
     color = random_color()
+    angle = random.randint(0, 359)
     players[pid] = {
         "id": pid,
         "name": name,
         "x": x,
         "y": y,
+        "angle": angle,
         "direction": "",
         "moving": False,
         "color": color,
-        # chat messages for this player
         "messages": []
     }
     connections[pid] = writer
 
-    # Send info about existing players and your player
+    # Send player data to new client and broadcast to others
     await send_message(writer, {"type": "yourInfo", "player": players[pid]})
     await send_message(writer, {"type": "currentPlayers", "players": players})
     await broadcast({"type": "newPlayer", "player": players[pid]}, exclude=pid)
 
-    # Read loop
     try:
         while True:
             line = await reader.readline()
@@ -90,55 +89,51 @@ async def handle_client(reader, writer):
                     players[pid]["moving"] = True
             elif mtype in ("moveStop", "movestop"):
                 direction = data.get("direction")
-                # Stop moving if the direction matches
                 if direction == players[pid]["direction"]:
                     players[pid]["moving"] = False
             elif mtype == "chat":
                 text = data.get("text", "")
                 if text:
-                    # store message with timestamp for possible removal
                     players[pid]["messages"].append({"text": text, "time": time.time()})
-                    # broadcast chat
                     await broadcast({"type": "chat", "id": pid, "text": text})
     except Exception:
-        # Any exception will close connection
         pass
     finally:
-        # Clean up
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
             pass
-        # Remove player
         if pid in players:
             players.pop(pid, None)
         if pid in connections:
             connections.pop(pid, None)
         await broadcast({"type": "playerDisconnected", "id": pid})
 
-async def game_loop(tick_rate=30, speed=3):
-    """Update player positions and broadcast state periodically."""
+async def game_loop(tick_rate=30, speed=3, rot_speed=5):
+    """Update player positions and orientations and broadcast state."""
     while True:
-        # update positions
         for p in list(players.values()):
             if p["moving"]:
-                if p["direction"] == "up":
-                    p["y"] -= speed
-                elif p["direction"] == "down":
-                    p["y"] += speed
-                elif p["direction"] == "left":
-                    p["x"] -= speed
-                elif p["direction"] == "right":
-                    p["x"] += speed
-        # broadcast state
+                d = p["direction"]
+                if d == "up":
+                    rad = math.radians(p["angle"])
+                    p["x"] += math.sin(rad) * speed
+                    p["y"] -= math.cos(rad) * speed
+                elif d == "down":
+                    rad = math.radians(p["angle"])
+                    p["x"] -= math.sin(rad) * speed
+                    p["y"] += math.cos(rad) * speed
+                elif d == "left":
+                    p["angle"] = (p["angle"] - rot_speed) % 360
+                elif d == "right":
+                    p["angle"] = (p["angle"] + rot_speed) % 360
         if players:
             await broadcast({"type": "state", "players": players})
         await asyncio.sleep(1 / tick_rate)
 
 async def main(host="0.0.0.0", port=8765):
     server = await asyncio.start_server(handle_client, host, port)
-    # start game loop
     loop_task = asyncio.create_task(game_loop())
     print(f"Server started on {host}:{port}")
     async with server:
