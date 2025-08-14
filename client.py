@@ -29,7 +29,7 @@ keys = {"up": False, "down": False, "left": False, "right": False}
 # Chat mode flag
 chat_mode = False
 
-def run_network(host='localhost', port=8765):
+def run_network(host="localhost", port=8765):
     """Runs in a separate thread. Connects to the server and reads messages."""
     async def network_coroutine():
         try:
@@ -37,7 +37,6 @@ def run_network(host='localhost', port=8765):
         except Exception as e:
             print(f"Unable to connect to server: {e}")
             return
-
         # Save loop and writer for send_message
         network_state["loop"] = asyncio.get_running_loop()
         network_state["writer"] = writer
@@ -131,8 +130,8 @@ def render():
             color = "#" + color
         # Draw player square
         canvas.create_rectangle(x, y, x + 20, y + 20, fill=color, outline="")
-        # Draw orientation arrow (adjust by -90 degrees so 0 degrees points up)
-        rad = math.radians(angle - 90)
+        # Draw orientation arrow - align with player's angle
+        rad = math.radians(angle)
         cx = x + 10
         cy = y + 10
         length = 15
